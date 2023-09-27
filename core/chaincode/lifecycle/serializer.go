@@ -220,11 +220,12 @@ func (s *Serializer) IsMetadataSerialized(namespace, name string, structure inte
 }
 
 // IsSerialized essentially checks if the hashes of a serialized version of a structure matches the hashes
-// of the pre-image of some struct serialized into the database.
-func (s *Serializer) IsSerialized(namespace, name string, structure interface{}, state OpaqueState) (bool, error) {
+// of the pre-image of some struct serialized into the database. Additionally, it returns a list of
+// parameter mismatches if there are any discrepancies between the provided structure and the serialized data.
+func (s *Serializer) IsSerialized(namespace, name string, structure interface{}, state OpaqueState) (bool, []string, error) {
 	value, allFields, err := s.SerializableChecks(structure)
 	if err != nil {
-		return false, errors.WithMessagef(err, "structure for namespace %s/%s is not serializable", namespace, name)
+		return false, nil, errors.WithMessagef(err, "structure for namespace %s/%s is not serializable", namespace, name)
 	}
 
 	fqKeys := make([]string, 0, len(allFields)+1)
@@ -237,7 +238,7 @@ func (s *Serializer) IsSerialized(namespace, name string, structure interface{},
 	for _, fqKey := range fqKeys {
 		value, err := state.GetStateHash(fqKey)
 		if err != nil {
-			return false, errors.WithMessagef(err, "could not get value for key %s", fqKey)
+			return false, nil, errors.WithMessagef(err, "could not get value for key %s", fqKey)
 		}
 		existingKeys[fqKey] = value
 	}
@@ -248,12 +249,14 @@ func (s *Serializer) IsSerialized(namespace, name string, structure interface{},
 	}
 	metadataBin, err := s.Marshaler.Marshal(metadata)
 	if err != nil {
-		return false, errors.WithMessagef(err, "could not marshal metadata for namespace %s/%s", namespace, name)
+		return false, nil, errors.WithMessagef(err, "could not marshal metadata for namespace %s/%s", namespace, name)
 	}
 
+	var parameterMismatches []string
 	metadataKeyName := MetadataKey(namespace, name)
 	if !bytes.Equal(util.ComputeSHA256(metadataBin), existingKeys[metadataKeyName]) {
-		return false, nil
+		parameterMismatches = append(parameterMismatches, metadata.Datatype)
+		return false, parameterMismatches, nil
 	}
 
 	for i := 0; i < value.NumField(); i++ {
@@ -275,7 +278,7 @@ func (s *Serializer) IsSerialized(namespace, name string, structure interface{},
 			if !fieldValue.IsNil() {
 				bin, err = s.Marshaler.Marshal(fieldValue.Interface().(proto.Message))
 				if err != nil {
-					return false, errors.Wrapf(err, "could not marshal field %s", fieldName)
+					return false, nil, errors.Wrapf(err, "could not marshal field %s", fieldName)
 				}
 			}
 			stateData.Type = &lb.StateData_Bytes{Bytes: bin}
@@ -284,15 +287,17 @@ func (s *Serializer) IsSerialized(namespace, name string, structure interface{},
 
 		marshaledFieldValue, err := s.Marshaler.Marshal(stateData)
 		if err != nil {
-			return false, errors.WithMessagef(err, "could not marshal value for key %s", keyName)
+			return false, nil, errors.WithMessagef(err, "could not marshal value for key %s", keyName)
 		}
 
-		if existingValue, ok := existingKeys[keyName]; !ok || !bytes.Equal(existingValue, util.ComputeSHA256(marshaledFieldValue)) {
-			return false, nil
+		existingValue, ok := existingKeys[keyName]
+		if !ok {
+			parameterMismatches = append(parameterMismatches, fieldName)
+		} else if !bytes.Equal(existingValue, util.ComputeSHA256(marshaledFieldValue)) {
+			parameterMismatches = append(parameterMismatches, fieldName)
 		}
 	}
-
-	return true, nil
+	return len(parameterMismatches) == 0, parameterMismatches, nil
 }
 
 // Deserialize accepts a struct (of a type previously serialized) and populates it with the values from the db.

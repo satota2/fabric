@@ -316,28 +316,29 @@ type ExternalFunctions struct {
 // CheckCommitReadiness takes a chaincode definition, checks that
 // its sequence number is the next allowable sequence number and checks which
 // organizations have approved the definition.
-func (ef *ExternalFunctions) CheckCommitReadiness(chname, ccname string, cd *ChaincodeDefinition, publicState ReadWritableState, orgStates []OpaqueState) (map[string]bool, error) {
+func (ef *ExternalFunctions) CheckCommitReadiness(chname, ccname string, cd *ChaincodeDefinition, publicState ReadWritableState, orgStates []OpaqueState) (map[string]bool, map[string][]string, error) {
 	currentSequence, err := ef.Resources.Serializer.DeserializeFieldAsInt64(NamespacesName, ccname, "Sequence", publicState)
 	if err != nil {
-		return nil, errors.WithMessage(err, "could not get current sequence")
+		return nil, nil, errors.WithMessage(err, "could not get current sequence")
 	}
 
 	if cd.Sequence != currentSequence+1 {
-		return nil, errors.Errorf("requested sequence is %d, but new definition must be sequence %d", cd.Sequence, currentSequence+1)
+		return nil, nil, errors.Errorf("requested sequence is %d, but new definition must be sequence %d", cd.Sequence, currentSequence+1)
 	}
 
 	if err := ef.SetChaincodeDefinitionDefaults(chname, cd); err != nil {
-		return nil, errors.WithMessagef(err, "could not set defaults for chaincode definition in channel %s", chname)
+		return nil, nil, errors.WithMessagef(err, "could not set defaults for chaincode definition in channel %s", chname)
 	}
 
 	var approvals map[string]bool
-	if approvals, err = ef.QueryOrgApprovals(ccname, cd, orgStates); err != nil {
-		return nil, err
+	var mismatches map[string][]string
+	if approvals, mismatches, err = ef.QueryOrgApprovals(ccname, cd, orgStates); err != nil {
+		return nil, nil, err
 	}
 
 	logger.Infof("Successfully checked commit readiness of chaincode name '%s' on channel '%s' with definition {%s}", ccname, chname, cd)
 
-	return approvals, nil
+	return approvals, mismatches, nil
 }
 
 // CommitChaincodeDefinition takes a chaincode definition, checks that its
@@ -347,7 +348,7 @@ func (ef *ExternalFunctions) CheckCommitReadiness(chname, ccname string, cd *Cha
 // the approvals to determine if the result is valid (typically, this means
 // checking that the peer's own org has approved the definition).
 func (ef *ExternalFunctions) CommitChaincodeDefinition(chname, ccname string, cd *ChaincodeDefinition, publicState ReadWritableState, orgStates []OpaqueState) (map[string]bool, error) {
-	approvals, err := ef.CheckCommitReadiness(chname, ccname, cd, publicState, orgStates)
+	approvals, _, err := ef.CheckCommitReadiness(chname, ccname, cd, publicState, orgStates)
 	if err != nil {
 		return nil, err
 	}
@@ -665,20 +666,25 @@ func (ef *ExternalFunctions) QueryChaincodeDefinition(name string, publicState R
 // QueryOrgApprovals returns a map containing the orgs whose orgStates were
 // provided and whether or not they have approved a chaincode definition with
 // the specified parameters.
-func (ef *ExternalFunctions) QueryOrgApprovals(name string, cd *ChaincodeDefinition, orgStates []OpaqueState) (map[string]bool, error) {
+func (ef *ExternalFunctions) QueryOrgApprovals(name string, cd *ChaincodeDefinition, orgStates []OpaqueState) (map[string]bool, map[string][]string, error) {
 	approvals := map[string]bool{}
+	mismatches := map[string][]string{}
 	privateName := fmt.Sprintf("%s#%d", name, cd.Sequence)
 	for _, orgState := range orgStates {
-		match, err := ef.Resources.Serializer.IsSerialized(NamespacesName, privateName, cd.Parameters(), orgState)
+		match, mismatchItems, err := ef.Resources.Serializer.IsSerialized(NamespacesName, privateName, cd.Parameters(), orgState)
 		if err != nil {
-			return nil, errors.WithMessagef(err, "serialization check failed for key %s", privateName)
+			return nil, nil, errors.WithMessagef(err, "serialization check failed for key %s", privateName)
 		}
 
 		_, org := implicitcollection.MspIDIfImplicitCollection(orgState.CollectionName())
+		logger.Infof("org %s's mismatch items are %v", org, mismatchItems)
 		approvals[org] = match
+		if len(mismatchItems) > 0 {
+			mismatches[org] = mismatchItems
+		}
 	}
 
-	return approvals, nil
+	return approvals, mismatches, nil
 }
 
 // InstallChaincode installs a given chaincode to the peer's chaincode store.
